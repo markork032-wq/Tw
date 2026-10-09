@@ -1,0 +1,594 @@
+name: Build GlitchMic APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+      - name: Create project files
+        run: |
+          mkdir -p .
+          cat > settings.gradle <<'EOF_0'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'GlitchMic'
+          include ':app', ':stub'
+          EOF_0
+          mkdir -p .
+          cat > build.gradle <<'EOF_1'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          EOF_1
+          mkdir -p stub
+          cat > stub/build.gradle <<'EOF_2'
+          plugins { id 'java-library' }
+          java {
+              sourceCompatibility = JavaVersion.VERSION_1_8
+              targetCompatibility = JavaVersion.VERSION_1_8
+          }
+          EOF_2
+          mkdir -p stub/src/main/java/de/robv/android/xposed
+          cat > stub/src/main/java/de/robv/android/xposed/IXposedHookLoadPackage.java <<'EOF_3'
+          package de.robv.android.xposed;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage;
+          public interface IXposedHookLoadPackage {
+              void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable;
+          }
+          EOF_3
+          mkdir -p stub/src/main/java/de/robv/android/xposed/callbacks
+          cat > stub/src/main/java/de/robv/android/xposed/callbacks/XC_LoadPackage.java <<'EOF_4'
+          package de.robv.android.xposed.callbacks;
+          public class XC_LoadPackage {
+              public static class LoadPackageParam {
+                  public String packageName;
+                  public String processName;
+                  public ClassLoader classLoader;
+              }
+          }
+          EOF_4
+          mkdir -p stub/src/main/java/de/robv/android/xposed
+          cat > stub/src/main/java/de/robv/android/xposed/XC_MethodHook.java <<'EOF_5'
+          package de.robv.android.xposed;
+          public abstract class XC_MethodHook {
+              public XC_MethodHook() {}
+              protected void beforeHookedMethod(MethodHookParam param) throws Throwable {}
+              protected void afterHookedMethod(MethodHookParam param) throws Throwable {}
+              public static class MethodHookParam {
+                  public Object thisObject;
+                  public Object[] args;
+                  public Object getResult() { return null; }
+                  public void setResult(Object result) {}
+              }
+              public class Unhook {}
+          }
+          EOF_5
+          mkdir -p stub/src/main/java/de/robv/android/xposed
+          cat > stub/src/main/java/de/robv/android/xposed/XposedHelpers.java <<'EOF_6'
+          package de.robv.android.xposed;
+          public class XposedHelpers {
+              public static XC_MethodHook.Unhook findAndHookMethod(Class<?> clazz, String methodName, Object... parameterTypesAndCallback) { return null; }
+          }
+          EOF_6
+          mkdir -p stub/src/main/java/de/robv/android/xposed
+          cat > stub/src/main/java/de/robv/android/xposed/XposedBridge.java <<'EOF_7'
+          package de.robv.android.xposed;
+          public class XposedBridge {
+              public static void log(String text) {}
+              public static void log(Throwable t) {}
+          }
+          EOF_7
+          mkdir -p app
+          cat > app/build.gradle <<'EOF_8'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.glitch.mic'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.glitch.mic'
+                  minSdk 24
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          dependencies {
+              compileOnly project(':stub')
+          }
+          EOF_8
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_9'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="GlitchMic" android:allowBackup="false">
+                  <meta-data android:name="xposedmodule" android:value="true" />
+                  <meta-data android:name="xposeddescription" android:value="Glitch voice for microphone input" />
+                  <meta-data android:name="xposedminversion" android:value="82" />
+              </application>
+          </manifest>
+          EOF_9
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/xposed_init <<'EOF_10'
+          com.glitch.mic.MainHook
+          EOF_10
+          mkdir -p app/src/main/java/com/glitch/mic
+          cat > app/src/main/java/com/glitch/mic/GlitchEngine.java <<'EOF_11'
+          package com.glitch.mic;
+
+          import java.util.Random;
+
+          /** Реалтайм-глитч для PCM16 (interleaved). Без аллокаций в горячем пути: все буферы создаются один раз. */
+          public class GlitchEngine {
+              // ---- режимы: 0 OFF, 1 Light, 2 Normal, 3 Heavy, 4 INSANE, 5 FREEZE ----
+              public static final int MODE_COUNT = 6;
+              static final int FREEZE = 5;
+              static volatile int MODE = 2;
+              public static int getMode() { return MODE; }
+              public static void cycleMode() { MODE = (MODE + 1) % MODE_COUNT; }
+
+              static final float[] PER_SEC = {0f, 0.8f, 1.6f, 3.0f, 5.0f, 0f};
+              static final int[]   MIN_MS  = {0, 60, 90, 120, 150, 0};
+              static final int[]   MAX_MS  = {0, 180, 260, 340, 450, 0};
+              static final float[] W_REVERSE = {0f, 0.10f, 0.20f, 0.25f, 0.30f, 0f};
+              static final float[] W_CHOP    = {0f, 0.15f, 0.20f, 0.25f, 0.30f, 0f};
+              static final float[] W_PITCH   = {0f, 0.10f, 0.20f, 0.30f, 0.35f, 0f};
+              // остальное = stutter
+              static final float RING_SEC = 1.5f;
+              static final int MAX_GLITCH_MS = 450;
+              static final int FREEZE_MS = 70;
+
+              private final Random rnd = new Random();
+              private short[] ring = new short[0];     // последние 1.5 с входа
+              private short[] scratch = new short[0];  // временный буфер для операций
+              private short[] gb = new short[0];       // текущий глитч-блок
+              private short[] frz = new short[0];      // сегмент для FREEZE
+              private short[] io = new short[0];       // буфер для конвертации byte[]/ByteBuffer
+              private int ringPos = 0, filled = 0;
+              private int sr = 0, ch = 0;
+              private int gbPos = 0, gbLen = 0;
+              private int frzLen = 0, frzPos = 0;
+              private boolean frozen = false;
+
+              /** Временный short[] для вызывающего (конвертация byte -> short), переиспользуется. */
+              public short[] io(int count) {
+                  if (io.length < count) io = new short[count];
+                  return io;
+              }
+
+              /** Эффект выключен: забываем накопленный звук, чтобы после включения не проигрывать старое. */
+              public synchronized void idle() {
+                  filled = 0; gbPos = gbLen; frozen = false;
+              }
+
+              private void configure(int sampleRate, int channels) {
+                  sr = sampleRate; ch = channels;
+                  ring = new short[(int) (RING_SEC * sr) * ch];
+                  scratch = new short[ring.length];
+                  gb = new short[(MAX_GLITCH_MS * sr / 1000 + 16) * ch];
+                  frz = new short[(FREEZE_MS * sr / 1000 + 8) * ch];
+                  ringPos = 0; filled = 0; gbPos = 0; gbLen = 0; frozen = false;
+              }
+
+              public synchronized void process(short[] a, int off, int n, int sampleRate, int channels) {
+                  if (channels < 1) channels = 1;
+                  if (sampleRate < 8000) sampleRate = 48000;
+                  n -= n % channels;
+                  if (n <= 0) return;
+                  if (sampleRate != sr || channels != ch) configure(sampleRate, channels);
+
+                  // 1) сырой вход -> кольцевой буфер
+                  pushRing(a, off, n);
+
+                  int mode = MODE;
+                  if (mode == 0) { gbPos = gbLen; frozen = false; return; }
+
+                  if (mode == FREEZE) {
+                      if (!frozen && filled > sr / 4 * ch) {
+                          frzLen = recent(FREEZE_MS * sr / 1000, false, frz);
+                          fade(frz, frzLen);
+                          frzPos = 0;
+                          frozen = true;
+                      }
+                      if (frozen) {
+                          int i = 0;
+                          while (i < n) {
+                              int k = Math.min(n - i, frzLen - frzPos);
+                              System.arraycopy(frz, frzPos, a, off + i, k);
+                              i += k;
+                              frzPos += k;
+                              if (frzPos >= frzLen) frzPos = 0;
+                          }
+                      }
+                      gbPos = gbLen;
+                      return;
+                  }
+                  frozen = false;
+
+                  // 2) решаем, начинать ли глитч
+                  int frames = n / ch;
+                  if (gbPos >= gbLen && filled > sr / 4 * ch) {
+                      float p = PER_SEC[mode] * frames / sr;
+                      if (rnd.nextFloat() < p) startGlitch(mode);
+                  }
+                  // 3) подменяем звук глитчем
+                  if (gbPos < gbLen) {
+                      int k = Math.min(n, gbLen - gbPos);
+                      System.arraycopy(gb, gbPos, a, off, k);
+                      gbPos += k;
+                  }
+              }
+
+              private void pushRing(short[] a, int off, int n) {
+                  int len = ring.length;
+                  if (n > len) { off += n - len; n = len; }
+                  int first = Math.min(n, len - ringPos);
+                  System.arraycopy(a, off, ring, ringPos, first);
+                  if (n > first) System.arraycopy(a, off + first, ring, 0, n - first);
+                  ringPos = (ringPos + n) % len;
+                  filled = Math.min(len, filled + n);
+              }
+
+              private void startGlitch(int mode) {
+                  int lenFrames = (MIN_MS[mode] + rnd.nextInt(MAX_MS[mode] - MIN_MS[mode] + 1)) * sr / 1000;
+                  float r = rnd.nextFloat();
+                  float tRev = W_REVERSE[mode], tChop = tRev + W_CHOP[mode], tPitch = tChop + W_PITCH[mode];
+                  int total;
+                  if (r < tRev) {
+                      int t = recent(lenFrames, true, scratch);
+                      total = reverse(scratch, t, gb);
+                  } else if (r < tChop) {
+                      total = recent(lenFrames, true, gb);
+                      chop(gb, total);
+                  } else if (r < tPitch) {
+                      double f = rnd.nextBoolean() ? 0.55 + rnd.nextDouble() * 0.25 : 1.3 + rnd.nextDouble() * 0.5;
+                      int t = recent((int) (lenFrames * f), true, scratch);
+                      total = resample(scratch, t, f, gb);
+                  } else {
+                      int seg = (30 + rnd.nextInt(90)) * sr / 1000;
+                      int t = recent(seg, true, scratch);
+                      fade(scratch, t);
+                      total = tile(scratch, t, lenFrames, gb);
+                  }
+                  fade(gb, total);
+                  gbPos = 0; gbLen = total;
+              }
+
+              /** Копирует в dst последние `frames` кадров (со случайным сдвигом назад до 250 мс). Возвращает кол-во short. */
+              private int recent(int frames, boolean random, short[] dst) {
+                  int availFrames = filled / ch;
+                  frames = Math.max(1, Math.min(frames, Math.min(availFrames, dst.length / ch)));
+                  int maxBack = Math.max(0, availFrames - frames);
+                  int back = random ? Math.min(maxBack, rnd.nextInt(Math.max(1, sr / 4))) : 0;
+                  int total = frames * ch;
+                  int len = ring.length;
+                  int start = ((ringPos - back * ch - total) % len + len) % len;
+                  int first = Math.min(total, len - start);
+                  System.arraycopy(ring, start, dst, 0, first);
+                  if (total > first) System.arraycopy(ring, 0, dst, first, total - first);
+                  return total;
+              }
+
+              private void fade(short[] x, int len) {
+                  int fr = Math.min(sr * 4 / 1000, len / ch / 2);
+                  for (int i = 0; i < fr; i++) {
+                      float g = (float) i / fr;
+                      for (int c = 0; c < ch; c++) {
+                          x[i * ch + c] = (short) (x[i * ch + c] * g);
+                          int j = len - (i + 1) * ch + c;
+                          x[j] = (short) (x[j] * g);
+                      }
+                  }
+              }
+
+              private int tile(short[] seg, int segLen, int frames, short[] dst) {
+                  int total = Math.min(frames * ch, dst.length);
+                  int pos = 0;
+                  while (pos < total) {
+                      int k = Math.min(segLen, total - pos);
+                      System.arraycopy(seg, 0, dst, pos, k);
+                      pos += k;
+                  }
+                  return total;
+              }
+
+              private int reverse(short[] x, int len, short[] dst) {
+                  int fr = len / ch;
+                  for (int i = 0; i < fr; i++)
+                      for (int c = 0; c < ch; c++) dst[i * ch + c] = x[(fr - 1 - i) * ch + c];
+                  return fr * ch;
+              }
+
+              private void chop(short[] y, int len) {
+                  int fr = len / ch;
+                  int i = 0; boolean on = true;
+                  while (i < fr) {
+                      int seg = (15 + rnd.nextInt(30)) * sr / 1000;
+                      if (!on) {
+                          int end = Math.min(fr, i + seg);
+                          java.util.Arrays.fill(y, i * ch, end * ch, (short) 0);
+                      }
+                      i += seg; on = !on;
+                  }
+              }
+
+              /** factor > 1 = быстрее/выше, < 1 = медленнее/ниже */
+              private int resample(short[] x, int len, double factor, short[] dst) {
+                  int inFr = len / ch;
+                  int outFr = Math.max(1, Math.min((int) (inFr / factor), dst.length / ch));
+                  for (int i = 0; i < outFr; i++) {
+                      double pos = i * factor;
+                      int i0 = (int) pos;
+                      int i1 = Math.min(inFr - 1, i0 + 1);
+                      i0 = Math.min(inFr - 1, i0);
+                      double fr = pos - i0;
+                      for (int c = 0; c < ch; c++)
+                          dst[i * ch + c] = (short) (x[i0 * ch + c] * (1 - fr) + x[i1 * ch + c] * fr);
+                  }
+                  return outFr * ch;
+              }
+          }
+          EOF_11
+          mkdir -p app/src/main/java/com/glitch/mic
+          cat > app/src/main/java/com/glitch/mic/Bubble.java <<'EOF_12'
+          package com.glitch.mic;
+
+          import android.app.Activity;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.TextView;
+
+          /** Круглая кнопка поверх приложения: тап = следующий режим, тащишь пальцем = двигаешь. */
+          class Bubble {
+              static final String TAG = "glitch_bubble";
+              static final String[] LABEL = {"OFF", "LT", "NRM", "HVY", "INS", "FRZ"};
+              static final int[] COLOR = {0xFF616161, 0xFF2E7D32, 0xFF1565C0, 0xFFEF6C00, 0xFFC62828, 0xFF6A1B9A};
+              static int posX = -1, posY = -1;
+
+              static void attach(final Activity a) {
+                  try {
+                      View dv = a.getWindow().getDecorView();
+                      if (!(dv instanceof FrameLayout)) return;
+                      final ViewGroup root = (ViewGroup) dv;
+                      if (root.findViewWithTag(TAG) != null) return;
+                      final float d = a.getResources().getDisplayMetrics().density;
+                      final int size = (int) (52 * d);
+                      if (posX < 0) {
+                          posX = a.getResources().getDisplayMetrics().widthPixels - size - (int) (12 * d);
+                          posY = (int) (160 * d);
+                      }
+                      TextView v = new TextView(a);
+                      v.setTag(TAG);
+                      v.setGravity(Gravity.CENTER);
+                      v.setTextColor(0xFFFFFFFF);
+                      v.setTextSize(12);
+                      v.setTypeface(Typeface.DEFAULT_BOLD);
+                      paint(v);
+                      FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size, Gravity.TOP | Gravity.START);
+                      lp.leftMargin = posX;
+                      lp.topMargin = posY;
+                      v.setOnTouchListener(new View.OnTouchListener() {
+                          float sx, sy;
+                          int sl, st;
+                          boolean moved;
+
+                          @Override
+                          public boolean onTouch(View view, MotionEvent e) {
+                              FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) view.getLayoutParams();
+                              switch (e.getActionMasked()) {
+                                  case MotionEvent.ACTION_DOWN: {
+                                      sx = e.getRawX(); sy = e.getRawY();
+                                      sl = p.leftMargin; st = p.topMargin;
+                                      moved = false;
+                                      return true;
+                                  }
+                                  case MotionEvent.ACTION_MOVE: {
+                                      float dx = e.getRawX() - sx, dy = e.getRawY() - sy;
+                                      if (!moved && Math.abs(dx) + Math.abs(dy) > 10 * d) moved = true;
+                                      if (moved) {
+                                          p.leftMargin = (int) (sl + dx);
+                                          p.topMargin = (int) (st + dy);
+                                          posX = p.leftMargin; posY = p.topMargin;
+                                          view.setLayoutParams(p);
+                                      }
+                                      return true;
+                                  }
+                                  case MotionEvent.ACTION_UP: {
+                                      if (!moved) {
+                                          GlitchEngine.cycleMode();
+                                          paint((TextView) view);
+                                      }
+                                      return true;
+                                  }
+                                  default:
+                                      return false;
+                              }
+                          }
+                      });
+                      root.addView(v, lp);
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              static void paint(TextView v) {
+                  int m = GlitchEngine.getMode();
+                  v.setText(LABEL[m]);
+                  GradientDrawable g = new GradientDrawable();
+                  g.setShape(GradientDrawable.OVAL);
+                  g.setColor((COLOR[m] & 0x00FFFFFF) | 0xEB000000);
+                  g.setStroke(3, 0xCCFFFFFF);
+                  v.setBackground(g);
+              }
+          }
+          EOF_12
+          mkdir -p app/src/main/java/com/glitch/mic
+          cat > app/src/main/java/com/glitch/mic/MainHook.java <<'EOF_13'
+          package com.glitch.mic;
+
+          import android.app.Activity;
+          import android.media.AudioFormat;
+          import android.media.AudioRecord;
+          import java.nio.ByteBuffer;
+          import java.util.WeakHashMap;
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodHook;
+          import de.robv.android.xposed.XposedBridge;
+          import de.robv.android.xposed.XposedHelpers;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+          /** Перехватывает AudioRecord.read(...) и пропускает звук микрофона через GlitchEngine. */
+          public class MainHook implements IXposedHookLoadPackage {
+
+              private static final WeakHashMap<Object, GlitchEngine> ENGINES = new WeakHashMap<>();
+
+              /**
+               * AudioRecord.read(short[],int,int) внутри вызывает read(short[],int,int,int) (и так для всех вариантов).
+               * Раньше хуки срабатывали на ОБА вызова -> звук обрабатывался дважды (дубли в буфере, двойной глитч, лаги).
+               * Теперь считаем глубину вызова и обрабатываем только на самом внешнем.
+               */
+              private static final ThreadLocal<int[]> DEPTH = new ThreadLocal<int[]>() {
+                  @Override
+                  protected int[] initialValue() { return new int[1]; }
+              };
+
+              private static GlitchEngine engineFor(Object rec) {
+                  synchronized (ENGINES) {
+                      GlitchEngine e = ENGINES.get(rec);
+                      if (e == null) { e = new GlitchEngine(); ENGINES.put(rec, e); }
+                      return e;
+                  }
+              }
+
+              @Override
+              public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+                  String pkg = lpparam.packageName;
+                  // не лезем в системные процессы и в сам модуль
+                  if (pkg == null || pkg.equals("android") || pkg.equals("com.android.systemui")
+                          || pkg.equals("com.glitch.mic")) return;
+
+                  Cb cb = new Cb();
+                  hook(cb, short[].class, int.class, int.class);
+                  hook(cb, short[].class, int.class, int.class, int.class);
+                  hook(cb, byte[].class, int.class, int.class);
+                  hook(cb, byte[].class, int.class, int.class, int.class);
+                  hook(cb, ByteBuffer.class, int.class);
+                  hook(cb, ByteBuffer.class, int.class, int.class);
+                  try {
+                      XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                          @Override
+                          protected void afterHookedMethod(MethodHookParam p) {
+                              Bubble.attach((Activity) p.thisObject);
+                          }
+                      });
+                  } catch (Throwable t) {
+                      XposedBridge.log("GlitchMic: bubble hook failed: " + t);
+                  }
+                  XposedBridge.log("GlitchMic: hooks set in " + pkg);
+              }
+
+              private static void hook(XC_MethodHook cb, Object... types) {
+                  Object[] args = new Object[types.length + 1];
+                  System.arraycopy(types, 0, args, 0, types.length);
+                  args[types.length] = cb;
+                  try {
+                      XposedHelpers.findAndHookMethod(AudioRecord.class, "read", args);
+                  } catch (Throwable t) {
+                      XposedBridge.log("GlitchMic: hook failed: " + t);
+                  }
+              }
+
+              static class Cb extends XC_MethodHook {
+                  @Override
+                  protected void beforeHookedMethod(MethodHookParam p) {
+                      DEPTH.get()[0]++;
+                  }
+
+                  @Override
+                  protected void afterHookedMethod(MethodHookParam p) {
+                      int[] d = DEPTH.get();
+                      int depth = --d[0];
+                      if (depth > 0) return;      // это внутренний вызов — обработаем на внешнем
+                      if (depth < 0) d[0] = 0;
+                      try {
+                          handle(p);
+                      } catch (Throwable t) {
+                          XposedBridge.log(t);
+                      }
+                  }
+
+                  private void handle(MethodHookParam p) {
+                      Object r = p.getResult();
+                      if (!(r instanceof Integer)) return;
+                      int n = (Integer) r;
+                      if (n <= 0) return;
+                      AudioRecord rec = (AudioRecord) p.thisObject;
+                      if (rec.getAudioFormat() != AudioFormat.ENCODING_PCM_16BIT) return;
+
+                      GlitchEngine e = engineFor(rec);
+                      // OFF = нулевая нагрузка: ничего не трогаем
+                      if (GlitchEngine.getMode() == 0) { e.idle(); return; }
+
+                      int sr = rec.getSampleRate();
+                      int ch = rec.getChannelCount();
+                      Object buf = p.args[0];
+
+                      if (buf instanceof short[]) {
+                          int off = (Integer) p.args[1];
+                          e.process((short[]) buf, off, n, sr, ch);
+                      } else if (buf instanceof byte[]) {
+                          int off = (Integer) p.args[1];
+                          byte[] b = (byte[]) buf;
+                          int cnt = n / 2;
+                          short[] tmp = e.io(cnt);
+                          for (int i = 0; i < cnt; i++)
+                              tmp[i] = (short) ((b[off + 2 * i] & 0xFF) | (b[off + 2 * i + 1] << 8));
+                          e.process(tmp, 0, cnt, sr, ch);
+                          for (int i = 0; i < cnt; i++) {
+                              short s = tmp[i];
+                              b[off + 2 * i] = (byte) s;
+                              b[off + 2 * i + 1] = (byte) (s >> 8);
+                          }
+                      } else if (buf instanceof ByteBuffer) {
+                          // direct-буфер: нативный код пишет с начала буфера; абсолютные get/put без аллокаций
+                          ByteBuffer bb = (ByteBuffer) buf;
+                          int cnt = n / 2;
+                          short[] tmp = e.io(cnt);
+                          for (int i = 0; i < cnt; i++)
+                              tmp[i] = (short) ((bb.get(2 * i) & 0xFF) | (bb.get(2 * i + 1) << 8));
+                          e.process(tmp, 0, cnt, sr, ch);
+                          for (int i = 0; i < cnt; i++) {
+                              short s = tmp[i];
+                              bb.put(2 * i, (byte) s);
+                              bb.put(2 * i + 1, (byte) (s >> 8));
+                          }
+                      }
+                  }
+              }
+          }
+          EOF_13
+      - name: Build
+        run: gradle :app:assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GlitchMic-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
